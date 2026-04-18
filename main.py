@@ -32,6 +32,9 @@ BINANCE_FAPI = "https://fapi.binance.com"
 AICOIN_PUBLIC = "https://api.aicoin.net"
 AICOIN_UID = "5374665"
 
+COINGECKO_API = "https://api.coingecko.com/api/v3"
+COINCAP_API = "https://api.coincap.io/v2"
+
 VALID_PERPETUALS = set()
 
 
@@ -129,9 +132,64 @@ def fetch_24hr_tickers() -> List[Dict]:
     try:
         resp = requests.get(f"{BINANCE_FAPI}/fapi/v1/ticker/24hr", timeout=10)
         if resp.status_code == 200:
+            print("[数据源] 成功从 币安API 获取数据。")
             return resp.json()
     except:
-        pass
+        print("[数据源] 币安API 失败，尝试备用数据源...")
+
+    try:
+        resp = requests.get(f"{AICOIN_PUBLIC}/v1/tickers?uid={AICOIN_UID}", timeout=10)
+        if resp.status_code == 200:
+            data = resp.json().get("data", [])
+            if data:
+                print(f"[数据源] 成功从 AICoin 获取数据。")
+                return data
+    except:
+        print("[数据源] AICoin 失败，尝试下一个备用数据源...")
+
+    try:
+        resp = requests.get(f"{COINGECKO_API}/coins/markets", params={
+            "vs_currency": "usdt",
+            "order": "volume_desc",
+            "per_page": 250,
+            "page": 1,
+            "sparkline": "false"
+        }, timeout=15)
+        if resp.status_code == 200:
+            raw_data = resp.json()
+            formatted_data = []
+            for coin in raw_data:
+                symbol = (coin['symbol'] + 'usdt').upper()
+                formatted_data.append({
+                    "symbol": symbol,
+                    "lastPrice": str(coin['current_price']),
+                    "priceChangePercent": str(coin['price_change_percentage_24h']),
+                    "quoteVolume": str(coin['total_volume'])
+                })
+            print(f"[数据源] 成功从 CoinGecko 获取数据。")
+            return formatted_data
+    except Exception as e:
+        print(f"[数据源] CoinGecko 失败: {e}，尝试下一个备用数据源...")
+
+    try:
+        resp = requests.get(f"{COINCAP_API}/assets", timeout=15)
+        if resp.status_code == 200:
+            raw_data = resp.json().get('data', [])
+            formatted_data = []
+            for asset in raw_data:
+                symbol = asset['symbol'] + 'USDT'
+                formatted_data.append({
+                    "symbol": symbol,
+                    "lastPrice": asset['priceUsd'],
+                    "priceChangePercent": str(float(asset['changePercent24Hr'])),
+                    "quoteVolume": asset['volumeUsd24Hr']
+                })
+            print(f"[数据源] 成功从 CoinCap 获取数据。")
+            return formatted_data
+    except Exception as e:
+        print(f"[数据源] CoinCap 失败: {e}。")
+
+    print("[数据源] 所有数据源均失败。")
     return []
 
 
@@ -268,21 +326,38 @@ def has_central_structure(klines: Dict) -> Tuple[bool, float, float]:
 
 
 def detect_divergence(closes: List[float], macd_difs: List[float]) -> Tuple[bool, bool]:
-    if len(closes) < 30 or len(macd_difs) < 30:
+    if len(closes) < 40 or len(macd_difs) < 40:
         return False, False
-    recent_low = min(closes[-20:])
-    recent_low_idx = closes[-20:].index(recent_low)
-    prev_low = min(closes[-40:-20])
-    prev_low_idx = closes[-40:-20].index(prev_low) + 20
-    recent_high = max(closes[-20:])
-    recent_high_idx = closes[-20:].index(recent_high)
-    prev_high = max(closes[-40:-20])
-    prev_high_idx = closes[-40:-20].index(prev_high) + 20
-    bottom_div = (recent_low < prev_low and
-                  macd_difs[-20:][recent_low_idx] > macd_difs[-40:-20][prev_low_idx])
-    top_div = (recent_high > prev_high and
-               macd_difs[-20:][recent_high_idx] < macd_difs[-40:-20][prev_high_idx])
-    return bottom_div, top_div
+
+    try:
+        closes_recent = closes[-20:]
+        closes_prev = closes[-40:-20]
+        
+        macd_recent = macd_difs[-20:]
+        macd_prev = macd_difs[-40:-20]
+
+        recent_low = min(closes_recent)
+        recent_low_idx = closes_recent.index(recent_low)
+
+        prev_low = min(closes_prev)
+        prev_low_idx = closes_prev.index(prev_low)
+
+        recent_high = max(closes_recent)
+        recent_high_idx = closes_recent.index(recent_high)
+
+        prev_high = max(closes_prev)
+        prev_high_idx = closes_prev.index(prev_high)
+
+        bottom_div = (recent_low < prev_low and
+                      macd_recent[recent_low_idx] > macd_prev[prev_low_idx])
+
+        top_div = (recent_high > prev_high and
+                   macd_recent[recent_high_idx] < macd_prev[prev_high_idx])
+
+        return bottom_div, top_div
+    except Exception as e:
+        print(f"[背驰检测] 发生错误: {e}")
+        return False, False
 
 
 def score_signal(symbol: str, klines_30m: Dict, klines_5m: Dict,
@@ -411,34 +486,57 @@ def apply_adx_filter(score: int, rating: str, klines_30m: Dict) -> Tuple[int, st
 
 
 def push_telegram(message: str) -> bool:
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+    token = os.environ.get("TELEGRAM_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    print(f"[推送] 检查Telegram凭据: Token={'有' if token else '无'}, Chat ID={'有' if chat_id else '无'}")
+    if not token or not chat_id:
+        print("[推送] Telegram凭据缺失，请检查 GitHub Secrets 配置。")
         return False
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        resp = requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": message}, timeout=10)
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        payload = {"chat_id": chat_id, "text": message}
+        resp = requests.post(url, data=payload, timeout=10)
+        print(f"[推送] Telegram API 返回: {resp.status_code} - {resp.text}")
         return resp.status_code == 200
-    except:
+    except Exception as e:
+        print(f"[推送] Telegram 异常: {e}")
         return False
 
 
 def push_wecom(message: str) -> bool:
-    if not WECOM_WEBHOOK:
+    webhook = os.environ.get("WECOM_WEBHOOK")
+    print(f"[推送] 检查企业微信凭据: Webhook={'有' if webhook else '无'}")
+    if not webhook:
+        print("[推送] 企业微信凭据缺失。")
         return False
     try:
-        resp = requests.post(WECOM_WEBHOOK, json={"msgtype": "text", "text": {"content": message}}, timeout=10)
+        resp = requests.post(
+            webhook,
+            json={"msgtype": "text", "text": {"content": message}},
+            timeout=10
+        )
+        print(f"[推送] 企业微信 API 返回: {resp.status_code} - {resp.text}")
         return resp.status_code == 200
-    except:
+    except Exception as e:
+        print(f"[推送] 企业微信 异常: {e}")
         return False
 
 
 def push_qmsg(message: str) -> bool:
-    if not QMSG_QQ or not QMSG_KEY:
+    key = os.environ.get("QMSG_KEY")
+    qq = os.environ.get("QMSG_QQ")
+    print(f"[推送] 检查Qmsg酱凭据: Key={'有' if key else '无'}, QQ={'有' if qq else '无'}")
+    if not key or not qq:
+        print("[推送] Qmsg酱凭据缺失。")
         return False
     try:
-        url = f"https://qmsg.zendee.cn/send/{QMSG_KEY}"
-        resp = requests.post(url, data={"msg": message, "qq": QMSG_QQ}, timeout=10)
+        url = f"https://qmsg.zendee.cn/send/{key}"
+        payload = {"msg": message, "qq": qq}
+        resp = requests.post(url, data=payload, timeout=10)
+        print(f"[推送] Qmsg酱 API 返回: {resp.status_code} - {resp.text}")
         return resp.status_code == 200
-    except:
+    except Exception as e:
+        print(f"[推送] Qmsg酱 异常: {e}")
         return False
 
 
@@ -449,6 +547,7 @@ def push_signal(symbol: str, rating: str, detail: Dict, is_long: bool) -> None:
     if signal_key in SIGNAL_HISTORY:
         last_time = SIGNAL_HISTORY[signal_key]
         if now - last_time < timedelta(minutes=CONFIG["dedup"]["minutes"]):
+            print(f"[推送] 信号 {signal_key} 在去重窗口内，跳过推送")
             return
     SIGNAL_HISTORY[signal_key] = now
 
@@ -462,14 +561,20 @@ def push_signal(symbol: str, rating: str, detail: Dict, is_long: bool) -> None:
 路况标签：{detail.get('adx_tag', '')}
 时间：{now.strftime('%Y-%m-%d %H:%M:%S')}"""
 
+    print(f"[推送] 准备发送 {rating} 级信号: {symbol}")
+
     if rating == "S":
-        push_telegram(message)
-        push_wecom(message)
-        if not push_telegram(message) and not push_wecom(message):
+        print("[推送] S级信号，尝试多通道推送...")
+        t_ok = push_telegram(message)
+        w_ok = push_wecom(message)
+        if not t_ok and not w_ok:
+            print("[推送] Telegram和企业微信均失败，尝试Qmsg兜底...")
             push_qmsg(message)
-    elif rating == "A":
+    elif rating == "A" or rating == "B":
+        print(f"[推送] {rating}级信号，推送Telegram...")
         push_telegram(message)
-    elif rating == "B":
+    else:
+        print(f"[推送] {rating}级信号，仅写入日志。")
         with open("b_signals.log", "a", encoding="utf-8") as f:
             f.write(f"{now.isoformat()} | {message}\n")
 
