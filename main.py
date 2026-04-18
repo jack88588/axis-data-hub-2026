@@ -411,34 +411,57 @@ def apply_adx_filter(score: int, rating: str, klines_30m: Dict) -> Tuple[int, st
 
 
 def push_telegram(message: str) -> bool:
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+    token = os.environ.get("TELEGRAM_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    print(f"[推送] 检查Telegram凭据: Token={'有' if token else '无'}, Chat ID={'有' if chat_id else '无'}")
+    if not token or not chat_id:
+        print("[推送] Telegram凭据缺失，请检查 GitHub Secrets 配置。")
         return False
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        resp = requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": message}, timeout=10)
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        payload = {"chat_id": chat_id, "text": message}
+        resp = requests.post(url, data=payload, timeout=10)
+        print(f"[推送] Telegram API 返回: {resp.status_code} - {resp.text}")
         return resp.status_code == 200
-    except:
+    except Exception as e:
+        print(f"[推送] Telegram 异常: {e}")
         return False
 
 
 def push_wecom(message: str) -> bool:
-    if not WECOM_WEBHOOK:
+    webhook = os.environ.get("WECOM_WEBHOOK")
+    print(f"[推送] 检查企业微信凭据: Webhook={'有' if webhook else '无'}")
+    if not webhook:
+        print("[推送] 企业微信凭据缺失。")
         return False
     try:
-        resp = requests.post(WECOM_WEBHOOK, json={"msgtype": "text", "text": {"content": message}}, timeout=10)
+        resp = requests.post(
+            webhook,
+            json={"msgtype": "text", "text": {"content": message}},
+            timeout=10
+        )
+        print(f"[推送] 企业微信 API 返回: {resp.status_code} - {resp.text}")
         return resp.status_code == 200
-    except:
+    except Exception as e:
+        print(f"[推送] 企业微信 异常: {e}")
         return False
 
 
 def push_qmsg(message: str) -> bool:
-    if not QMSG_QQ or not QMSG_KEY:
+    key = os.environ.get("QMSG_KEY")
+    qq = os.environ.get("QMSG_QQ")
+    print(f"[推送] 检查Qmsg酱凭据: Key={'有' if key else '无'}, QQ={'有' if qq else '无'}")
+    if not key or not qq:
+        print("[推送] Qmsg酱凭据缺失。")
         return False
     try:
-        url = f"https://qmsg.zendee.cn/send/{QMSG_KEY}"
-        resp = requests.post(url, data={"msg": message, "qq": QMSG_QQ}, timeout=10)
+        url = f"https://qmsg.zendee.cn/send/{key}"
+        payload = {"msg": message, "qq": qq}
+        resp = requests.post(url, data=payload, timeout=10)
+        print(f"[推送] Qmsg酱 API 返回: {resp.status_code} - {resp.text}")
         return resp.status_code == 200
-    except:
+    except Exception as e:
+        print(f"[推送] Qmsg酱 异常: {e}")
         return False
 
 
@@ -449,6 +472,7 @@ def push_signal(symbol: str, rating: str, detail: Dict, is_long: bool) -> None:
     if signal_key in SIGNAL_HISTORY:
         last_time = SIGNAL_HISTORY[signal_key]
         if now - last_time < timedelta(minutes=CONFIG["dedup"]["minutes"]):
+            print(f"[推送] 信号 {signal_key} 在去重窗口内，跳过推送")
             return
     SIGNAL_HISTORY[signal_key] = now
 
@@ -462,14 +486,20 @@ def push_signal(symbol: str, rating: str, detail: Dict, is_long: bool) -> None:
 路况标签：{detail.get('adx_tag', '')}
 时间：{now.strftime('%Y-%m-%d %H:%M:%S')}"""
 
+    print(f"[推送] 准备发送 {rating} 级信号: {symbol}")
+
     if rating == "S":
-        push_telegram(message)
-        push_wecom(message)
-        if not push_telegram(message) and not push_wecom(message):
+        print("[推送] S级信号，尝试多通道推送...")
+        t_ok = push_telegram(message)
+        w_ok = push_wecom(message)
+        if not t_ok and not w_ok:
+            print("[推送] Telegram和企业微信均失败，尝试Qmsg兜底...")
             push_qmsg(message)
     elif rating == "A":
+        print("[推送] A级信号，仅推送Telegram...")
         push_telegram(message)
-    elif rating == "B":
+    else:
+        print(f"[推送] {rating}级信号，仅写入日志。")
         with open("b_signals.log", "a", encoding="utf-8") as f:
             f.write(f"{now.isoformat()} | {message}\n")
 
