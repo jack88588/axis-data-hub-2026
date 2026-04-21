@@ -32,9 +32,6 @@ BINANCE_FAPI = "https://fapi.binance.com"
 AICOIN_PUBLIC = "https://api.aicoin.net"
 AICOIN_UID = "5374665"
 
-COINGECKO_API = "https://api.coingecko.com/api/v3"
-COINCAP_API = "https://api.coincap.io/v2"
-
 VALID_PERPETUALS = set()
 
 
@@ -132,64 +129,9 @@ def fetch_24hr_tickers() -> List[Dict]:
     try:
         resp = requests.get(f"{BINANCE_FAPI}/fapi/v1/ticker/24hr", timeout=10)
         if resp.status_code == 200:
-            print("[数据源] 成功从 币安API 获取数据。")
             return resp.json()
     except:
-        print("[数据源] 币安API 失败，尝试备用数据源...")
-
-    try:
-        resp = requests.get(f"{AICOIN_PUBLIC}/v1/tickers?uid={AICOIN_UID}", timeout=10)
-        if resp.status_code == 200:
-            data = resp.json().get("data", [])
-            if data:
-                print(f"[数据源] 成功从 AICoin 获取数据。")
-                return data
-    except:
-        print("[数据源] AICoin 失败，尝试下一个备用数据源...")
-
-    try:
-        resp = requests.get(f"{COINGECKO_API}/coins/markets", params={
-            "vs_currency": "usdt",
-            "order": "volume_desc",
-            "per_page": 250,
-            "page": 1,
-            "sparkline": "false"
-        }, timeout=15)
-        if resp.status_code == 200:
-            raw_data = resp.json()
-            formatted_data = []
-            for coin in raw_data:
-                symbol = (coin['symbol'] + 'usdt').upper()
-                formatted_data.append({
-                    "symbol": symbol,
-                    "lastPrice": str(coin['current_price']),
-                    "priceChangePercent": str(coin['price_change_percentage_24h']),
-                    "quoteVolume": str(coin['total_volume'])
-                })
-            print(f"[数据源] 成功从 CoinGecko 获取数据。")
-            return formatted_data
-    except Exception as e:
-        print(f"[数据源] CoinGecko 失败: {e}，尝试下一个备用数据源...")
-
-    try:
-        resp = requests.get(f"{COINCAP_API}/assets", timeout=15)
-        if resp.status_code == 200:
-            raw_data = resp.json().get('data', [])
-            formatted_data = []
-            for asset in raw_data:
-                symbol = asset['symbol'] + 'USDT'
-                formatted_data.append({
-                    "symbol": symbol,
-                    "lastPrice": asset['priceUsd'],
-                    "priceChangePercent": str(float(asset['changePercent24Hr'])),
-                    "quoteVolume": asset['volumeUsd24Hr']
-                })
-            print(f"[数据源] 成功从 CoinCap 获取数据。")
-            return formatted_data
-    except Exception as e:
-        print(f"[数据源] CoinCap 失败: {e}。")
-
-    print("[数据源] 所有数据源均失败。")
+        pass
     return []
 
 
@@ -326,38 +268,21 @@ def has_central_structure(klines: Dict) -> Tuple[bool, float, float]:
 
 
 def detect_divergence(closes: List[float], macd_difs: List[float]) -> Tuple[bool, bool]:
-    if len(closes) < 40 or len(macd_difs) < 40:
+    if len(closes) < 30 or len(macd_difs) < 30:
         return False, False
-
-    try:
-        closes_recent = closes[-20:]
-        closes_prev = closes[-40:-20]
-        
-        macd_recent = macd_difs[-20:]
-        macd_prev = macd_difs[-40:-20]
-
-        recent_low = min(closes_recent)
-        recent_low_idx = closes_recent.index(recent_low)
-
-        prev_low = min(closes_prev)
-        prev_low_idx = closes_prev.index(prev_low)
-
-        recent_high = max(closes_recent)
-        recent_high_idx = closes_recent.index(recent_high)
-
-        prev_high = max(closes_prev)
-        prev_high_idx = closes_prev.index(prev_high)
-
-        bottom_div = (recent_low < prev_low and
-                      macd_recent[recent_low_idx] > macd_prev[prev_low_idx])
-
-        top_div = (recent_high > prev_high and
-                   macd_recent[recent_high_idx] < macd_prev[prev_high_idx])
-
-        return bottom_div, top_div
-    except Exception as e:
-        print(f"[背驰检测] 发生错误: {e}")
-        return False, False
+    recent_low = min(closes[-20:])
+    recent_low_idx = closes[-20:].index(recent_low)
+    prev_low = min(closes[-40:-20])
+    prev_low_idx = closes[-40:-20].index(prev_low) + 20
+    recent_high = max(closes[-20:])
+    recent_high_idx = closes[-20:].index(recent_high)
+    prev_high = max(closes[-40:-20])
+    prev_high_idx = closes[-40:-20].index(prev_high) + 20
+    bottom_div = (recent_low < prev_low and
+                  macd_difs[-20:][recent_low_idx] > macd_difs[-40:-20][prev_low_idx])
+    top_div = (recent_high > prev_high and
+               macd_difs[-20:][recent_high_idx] < macd_difs[-40:-20][prev_high_idx])
+    return bottom_div, top_div
 
 
 def score_signal(symbol: str, klines_30m: Dict, klines_5m: Dict,
@@ -570,8 +495,8 @@ def push_signal(symbol: str, rating: str, detail: Dict, is_long: bool) -> None:
         if not t_ok and not w_ok:
             print("[推送] Telegram和企业微信均失败，尝试Qmsg兜底...")
             push_qmsg(message)
-    elif rating == "A" or rating == "B":
-        print(f"[推送] {rating}级信号，推送Telegram...")
+    elif rating == "A":
+        print("[推送] A级信号，仅推送Telegram...")
         push_telegram(message)
     else:
         print(f"[推送] {rating}级信号，仅写入日志。")
